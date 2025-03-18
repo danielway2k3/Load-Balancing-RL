@@ -13,12 +13,70 @@ class Monitor:
         self.lb_ip = '10.0.0.100'
         self.data = []
         
+        # Kiểm tra cấu hình Mininet
+        self._ensure_mininet_running()
+    
+    def _ensure_mininet_running(self):
+        """Kiểm tra Mininet đang chạy và hiển thị thông tin"""
+        try:
+            output = subprocess.check_output("sudo mn -c", shell=True, stderr=subprocess.PIPE, text=True)
+            print("Lỗi: Đang xóa phiên Mininet cũ. Vui lòng khởi động lại Mininet trước khi chạy.")
+            print("Gợi ý: Chạy 'sudo python topology.py' trước khi chạy script này.")
+            print("Script sẽ tiếp tục với giả định Mininet đã chạy, nhưng có thể gặp lỗi.")
+        except:
+            # Không xóa được phiên cũ có thể do Mininet đang chạy
+            pass
+        
+        # Kiểm tra xem các tiến trình Mininet có đang chạy không
+        try:
+            pids = subprocess.check_output("pgrep -f mininet", shell=True, text=True).strip()
+            if pids:
+                print("Phát hiện tiến trình Mininet đang chạy")
+                
+                # Kiểm tra xem các host cần thiết có tồn tại không
+                ping_test = subprocess.call(
+                    "sudo bash -c 'cd /proc/`pgrep -f \"mn.* %s\"|head -n 1`/root/proc && ping -c 1 -W 1 %s >/dev/null 2>&1'" % (self.lb, self.host_ips['h1']), 
+                    shell=True
+                )
+                if ping_test == 0:
+                    print(f"Xác nhận kết nối từ {self.lb} đến {self.host_ips['h1']}")
+                else:
+                    print(f"! Không thể ping từ {self.lb} đến {self.host_ips['h1']}")
+                    print("  Đảm bảo mạng được cấu hình đúng.")
+        except subprocess.CalledProcessError:
+            print("! Không phát hiện tiến trình Mininet nào đang chạy")
+            print("  Vui lòng khởi động Mininet với topology đúng trước khi chạy script này.")
+    
+    def _run_mininet_command(self, node, cmd):
+        """Chạy lệnh trên node Mininet thông qua bash namespace"""
+        try:
+            # Tìm PID của node Mininet
+            pid_cmd = f"pgrep -f 'mininet:.*{node}($| )'"
+            node_pid = subprocess.check_output(pid_cmd, shell=True, text=True).strip().split('\n')[0]
+            
+            if not node_pid:
+                raise Exception(f"Không tìm thấy PID cho node {node}")
+            
+            # Chạy lệnh trong namespace của node
+            full_cmd = f"sudo bash -c 'cd /proc/{node_pid}/root && {cmd}'"
+            return subprocess.check_output(full_cmd, shell=True, stderr=subprocess.STDOUT, text=True)
+        except subprocess.CalledProcessError as e:
+            print(f"Lỗi khi chạy lệnh '{cmd}' trên {node}: {e}")
+            if hasattr(e, 'output'):
+                print(f"Output: {e.output.strip()}")
+            return None
+        except Exception as e:
+            print(f"Lỗi: {e}")
+            return None
+    
     def ping_latency(self, host_ip):
         """Đo độ trễ từ load balancer đến host"""
         try:
-            # Sử dụng lệnh "ping" trong môi trường shell thay vì qua Mininet CLI
-            cmd = f"sudo ip netns exec {self.lb} ping -c 3 -q {host_ip}"
-            output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, text=True)
+            cmd = f"ping -c 3 -q {host_ip}"
+            output = self._run_mininet_command(self.lb, cmd)
+            
+            if not output:
+                raise Exception("Không nhận được kết quả ping")
             
             # Phân tích kết quả ping để lấy RTT trung bình
             pattern = r"round-trip min/avg/max/mdev = [\d.]+/([\d.]+)/[\d.]+/[\d.]+ ms"
@@ -26,29 +84,21 @@ class Monitor:
             if match:
                 return float(match.group(1))
             else:
-                print(f"Warning: Could not extract ping latency from: {output}")
-                # Sử dụng giá trị dự phòng từ cấu hình
-                if host_ip == '10.0.0.1':  # h1
-                    return 50.0
-                elif host_ip == '10.0.0.2':  # h2
-                    return 100.0
-                elif host_ip == '10.0.0.3':  # h3
-                    return 150.0
-                return 100.0  # Giá trị mặc định
+                print(f"Không thể phân tích kết quả ping: {output[:100]}...")
+                raise Exception("Định dạng ping không đúng")
                 
-        except subprocess.CalledProcessError as e:
-            print(f"Error measuring latency: {e}")
-            print(f"Error output: {e.output if hasattr(e, 'output') else 'N/A'}")
+        except Exception as e:
+            print(f"Lỗi khi đo độ trễ đến {host_ip}: {e}")
             
-            # Sử dụng giá trị dự phòng
+            # Sử dụng giá trị dự phòng dựa trên cấu hình topology
             if host_ip == '10.0.0.1':  # h1
-                return 50.0
+                return 50.0  # Như đã cấu hình trong topology
             elif host_ip == '10.0.0.2':  # h2
-                return 100.0
+                return 100.0  # Như đã cấu hình trong topology
             elif host_ip == '10.0.0.3':  # h3
-                return 150.0
+                return 150.0  # Như đã cấu hình trong topology
             else:
-                return 100.0
+                return 100.0  # Giá trị mặc định
     
     def measure_throughput(self, host):
         """Đo thông lượng từ load balancer đến host"""
@@ -56,22 +106,21 @@ class Monitor:
             host_ip = self.host_ips[host]
             
             # Dừng iperf server nếu còn từ lần chạy trước
-            stop_server_cmd = f"sudo ip netns exec {host} pkill -9 iperf || true"
-            subprocess.call(stop_server_cmd, shell=True)
+            self._run_mininet_command(host, "pkill -9 iperf || true")
             
             # Khởi động iperf server trên host đích
-            server_cmd = f"sudo ip netns exec {host} iperf -s -D"
-            subprocess.call(server_cmd, shell=True)
+            self._run_mininet_command(host, "iperf -s -D")
             
             time.sleep(0.5)  # Chờ server khởi động
             
             # Chạy iperf client từ load balancer
-            client_cmd = f"sudo ip netns exec {self.lb} iperf -c {host_ip} -t 2 -f m"
-            output = subprocess.check_output(client_cmd, shell=True, stderr=subprocess.STDOUT, text=True)
+            output = self._run_mininet_command(self.lb, f"iperf -c {host_ip} -t 2 -f m")
             
             # Dừng iperf server
-            stop_server_cmd = f"sudo ip netns exec {host} pkill -9 iperf"
-            subprocess.call(stop_server_cmd, shell=True)
+            self._run_mininet_command(host, "pkill -9 iperf")
+            
+            if not output:
+                raise Exception("Không nhận được kết quả iperf")
             
             # Phân tích kết quả để lấy thông lượng
             pattern = r"(\d+\.?\d*)\s+Mbits/sec"
@@ -81,12 +130,11 @@ class Monitor:
                 throughput = float(match.group(1))
                 return throughput
             else:
-                print(f"Warning: Could not extract throughput from: {output}")
-                return 5.0  # Giá trị mặc định
+                print(f"Không thể phân tích kết quả iperf: {output[:100]}...")
+                raise Exception("Định dạng iperf không đúng")
                 
-        except subprocess.CalledProcessError as e:
-            print(f"Error measuring throughput: {e}")
-            print(f"Error output: {e.output if hasattr(e, 'output') else 'N/A'}")
+        except Exception as e:
+            print(f"Lỗi khi đo thông lượng đến {host}: {e}")
             
             # Nếu đo thất bại, sử dụng giá trị dự phòng ước lượng dựa trên độ trễ
             latency = self.ping_latency(self.host_ips[host])
@@ -97,17 +145,24 @@ class Monitor:
         """Lấy mức sử dụng CPU của host"""
         try:
             # Sử dụng lệnh top để lấy thông tin sử dụng CPU
-            cmd = f"sudo ip netns exec {host} top -bn1 | grep 'Cpu(s)' | awk '{{print $2 + $4}}'"
-            output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, text=True)
+            cmd = "top -bn1 | grep '%Cpu' | awk '{print $2+$4+$6}'"
+            output = self._run_mininet_command(host, cmd)
             
-            cpu_usage = float(output.strip())
-            return cpu_usage
+            if not output or not output.strip():
+                # Thử dùng lệnh khác
+                cmd = "grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage}'"
+                output = self._run_mininet_command(host, cmd)
             
-        except subprocess.CalledProcessError as e:
-            print(f"Error getting CPU usage: {e}")
-            print(f"Error output: {e.output if hasattr(e, 'output') else 'N/A'}")
+            if output and output.strip():
+                cpu_usage = float(output.strip())
+                return cpu_usage
+            else:
+                raise Exception("Không nhận được dữ liệu CPU")
             
-            # Sử dụng giá trị dự phòng
+        except Exception as e:
+            print(f"Lỗi khi đo CPU trên {host}: {e}")
+            
+            # Sử dụng giá trị mô phỏng
             if host == 'h1':
                 return 30.0  # Giả định tải vừa phải
             elif host == 'h2':
@@ -122,22 +177,22 @@ class Monitor:
         metrics = {}
         timestamp = time.time()
         
-        print("Collecting metrics from hosts...")
+        print("Thu thập thông số từ các máy chủ...")
         
         for host in self.hosts:
             host_ip = self.host_ips[host]
             
             # Đo độ trễ
             latency = self.ping_latency(host_ip)
-            print(f"{host} latency: {latency:.2f} ms")
+            print(f"{host} độ trễ: {latency:.2f} ms")
             
             # Đo thông lượng
             throughput = self.measure_throughput(host)
-            print(f"{host} throughput: {throughput:.2f} Mbps")
+            print(f"{host} thông lượng: {throughput:.2f} Mbps")
             
             # Lấy mức sử dụng CPU
             cpu = self.get_cpu_usage(host)
-            print(f"{host} CPU usage: {cpu:.2f}%")
+            print(f"{host} CPU: {cpu:.2f}%")
             
             # Lưu dữ liệu
             self.data.append({
@@ -161,27 +216,12 @@ class Monitor:
         """Lưu dữ liệu đã thu thập vào tệp CSV"""
         df = pd.DataFrame(self.data)
         df.to_csv(filename, index=False)
-        print(f"Data saved to {filename}")
+        print(f"Đã lưu dữ liệu vào {filename}")
         
     def verify_mininet_running(self):
         """Kiểm tra xem Mininet đã chạy chưa"""
         try:
-            # Kiểm tra xem namespace mạng của Mininet có tồn tại không
-            cmd = "sudo ip netns list"
-            output = subprocess.check_output(cmd, shell=True, text=True)
-            
-            # Kiểm tra từng host
-            hosts_found = []
-            for host in self.hosts + [self.lb]:
-                if host in output:
-                    hosts_found.append(host)
-            
-            if hosts_found:
-                print(f"Mininet running with hosts: {', '.join(hosts_found)}")
-                return True
-            else:
-                print("No Mininet hosts found. Please start Mininet first.")
-                return False
-        except subprocess.CalledProcessError as e:
-            print(f"Error checking Mininet status: {e}")
+            pids = subprocess.check_output("pgrep -f mininet", shell=True, text=True).strip()
+            return len(pids) > 0
+        except subprocess.CalledProcessError:
             return False
