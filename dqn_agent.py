@@ -101,10 +101,17 @@ class DQNAgent:
     def preprocess_state(self, metrics):
         """Convert raw metrics to state vector for DQN"""
         state = []
+        avg_metrics = {'latency':0, 'thourghput':0, 'cpu':0}
+        
         for host in ['h1', 'h2', 'h3']:
-            state.append(metrics[host]['latency'])
-            state.append(metrics[host]['throughput'])
-            state.append(metrics[host]['cpu'])
+            for metric in ['latency', 'throughput', 'cpu']:
+                value = metrics[host][metric]
+                state.append(value)
+                avg_metrics[metrics] += value / 3
+                
+        for host in ['h1', 'h2', 'h3']:
+            state.append(metrics[host]['cpu'] / avg_metrics['cpu'])
+            state.append(metrics[host]['throughput'] / avg_metrics['throughput'])
         return np.array(state)
 
     def calculate_reward(self, host, metrics):
@@ -113,6 +120,17 @@ class DQNAgent:
         latency = metrics[host]['latency']
         cpu = metrics[host]['cpu']
         
-        # Reward formula: throughput - 0.05 * latency - 0.1 * cpu
-        reward = throughput - 0.05 * latency - 0.1 * cpu
+        # normalize metrics
+        norm_throughput = throughput / 10.0
+        norm_latency = min(1.0, latency / 200.0)
+        norm_cpu = cpu / 100.0
+        
+        # weighted reward components
+        throughput_reward = 0.2 * norm_throughput
+        latency_penalty = -0.1 * norm_latency
+        cpu_penalty = -0.5 * norm_cpu
+        
+        balance_penalty = -0.2 if cpu > 80.0 else 0.0
+        
+        reward = throughput_reward + latency_penalty + cpu_penalty + balance_penalty
         return reward

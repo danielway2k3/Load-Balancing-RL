@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
-from control import SDNController
+from controller import SDNController
 
 def main():
     parser = argparse.ArgumentParser(description='DQN-based SDN Load Balancer with Ryu')

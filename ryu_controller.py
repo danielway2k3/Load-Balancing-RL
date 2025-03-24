@@ -65,15 +65,46 @@ class LoadBalancerController(app_manager.RyuApp):
     
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
-        datapath = ev.msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+        try:
+            datapath = ev.msg.datapath
+            ofproto = datapath.ofproto
+            parser = datapath.ofproto_parser
 
-        # Install table-miss flow entry
-        match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                          ofproto.OFPCML_NO_BUFFER)]
-        self.add_flow(datapath, 0, match, actions)
+            # Install table-miss flow entry
+            match = parser.OFPMatch()
+            actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                            ofproto.OFPCML_NO_BUFFER)]
+            self.add_flow(datapath, 0, match, actions)
+            
+            # Add default forwarding rules
+            self._add_default_flows(datapath)
+            
+            self.logger.info(f"Switch {datapath.id} configured with default flows")
+            
+        except Exception as e:
+            self.logger.error(f"Error configuring switch: {e}")
+            raise
+        
+    def _add_default_flows(self, datapath):
+        """Add basic connectivity flows"""
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto  # Add this line to get ofproto
+        
+        # Allow all ARP
+        match = parser.OFPMatch(eth_type=0x0806)  # ARP
+        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+        self.add_flow(datapath, 1, match, actions)
+        
+        # Allow IPv4 between known hosts
+        for src_ip in self.server_ips.keys():
+            for dst_ip in [self.lb_ip, self.client_ip]:
+                match = parser.OFPMatch(
+                    eth_type=0x0800,  # IPv4
+                    ipv4_src=src_ip,
+                    ipv4_dst=dst_ip
+                )
+                actions = [parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
+                self.add_flow(datapath, 1, match, actions)
     
     def add_flow(self, datapath, priority, match, actions, buffer_id=None, idle_timeout=0, hard_timeout=0):
         ofproto = datapath.ofproto
@@ -173,12 +204,6 @@ class LoadBalancerController(app_manager.RyuApp):
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
     
-    def _handle_arp(self, datapath, in_port, pkt):
-        """Handle ARP packets"""
-        # Implement ARP handling if needed
-        # For simplicity, we're using static ARP in the topology setup
-        pass
-    
     def _handle_ipv4(self, datapath, in_port, ip_header, pkt):
         """Handle IPv4 packets"""
         parser = datapath.ofproto_parser
@@ -246,6 +271,14 @@ class LoadBalancerController(app_manager.RyuApp):
         # Build action
         output_port = int(rule['output_port'])
         actions = [parser.OFPActionOutput(output_port)]
+        
+        if 'qos' in rule:
+            qos_config = {
+                'max_rate': rule.get('max_rate', '10M'),
+                'min_rate': rule.get('min_rate', '1M'),
+                'brust': rule.get('brust', '1M')
+            }
+            actions.append(parser.OFPActionSetQueue(rule.get('queue_id', 1)))
         
         # Add flow
         idle_timeout = rule.get('idle_timeout', 0)

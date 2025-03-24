@@ -4,6 +4,7 @@ from mininet.cli import CLI
 from mininet.log import setLogLevel
 from mininet.link import TCLink
 from mininet.topo import Topo
+import os
 
 class LoadBalancerTopo(Topo):
     def build(self):
@@ -38,8 +39,41 @@ def start_network():
     
     # Khởi động mạng
     net.start()
+    # Create symlinks for easier access
+    print("Creating namespace symlinks...")
+    for host in net.hosts:
+        cmd = f"sudo ln -sf /var/run/netns/mn-{host.name} /var/run/netns/{host.name}"
+        os.system(cmd)
+        print(f"Created symlink for {host.name}")
+    print("Congiguring nerwork...")
     
-    print("Network started. Press Ctrl+D to exit CLI and continue with the script.")
+    for host in net.hosts:
+        host.cmd('ip link set dev lo up')
+    
+    # Configure load balancer
+    lb = net.get('lb')
+    lb.cmd('ip route add default via 10.0.0.100')
+    
+    # Configure client
+    client = net.get('client')
+    client.cmd('ip route add default via 10.0.0.99')
+    
+    # Configure servers
+    h1 = net.get('h1')
+    h1.cmd('ip route add default via 10.0.0.1')
+    
+    h2 = net.get('h2')
+    h2.cmd('ip route add default via 10.0.0.2')
+    
+    h3 = net.get('h3')
+    h3.cmd('ip route add default via 10.0.0.3')
+    
+    # Wait for network to settle
+    print("Waiting for network to settle...")
+    net.waitConnected()
+    
+    print("Network configuration completed")
+    print("Try 'pingall' to test connectivity")
     
     # Mở CLI và chờ người dùng thoát
     CLI(net)
